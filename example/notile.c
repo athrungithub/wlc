@@ -1,0 +1,376 @@
+#include <stdlib.h>
+#include <stdio.h>
+#include <wlc/wlc.h>
+#include <chck/math/math.h>
+#include <chck/string/string.h>
+#include <linux/input.h>
+
+enum {
+   BIT_BEMENU = 1 << 5,
+};
+
+bool is_menu = false;
+int32_t prefix = 0;
+
+static struct {
+   struct {
+      wlc_handle view;
+      struct wlc_point grab;
+      uint32_t edges;
+   } action;
+} compositor;
+
+enum move_to {
+   LEFT,
+   DOWN,
+   UP,
+   RIGHT
+};
+
+static bool
+start_interactive_action(wlc_handle view, const struct wlc_point *origin)
+{
+   if (compositor.action.view)
+      return false;
+
+   compositor.action.view = view;
+   compositor.action.grab = *origin;
+   wlc_view_bring_to_front(view);
+   return true;
+}
+
+static void
+start_interactive_move(wlc_handle view, const struct wlc_point *origin)
+{
+   start_interactive_action(view, origin);
+}
+
+static void
+start_interactive_resize(wlc_handle view, uint32_t edges, const struct wlc_point *origin)
+{
+   const struct wlc_geometry *g;
+   if (!(g = wlc_view_get_geometry(view)) || !start_interactive_action(view, origin))
+      return;
+
+   const int32_t halfw = g->origin.x + g->size.w / 2;
+   const int32_t halfh = g->origin.y + g->size.h / 2;
+
+   if (!(compositor.action.edges = edges)) {
+      compositor.action.edges = (origin->x < halfw ? WLC_RESIZE_EDGE_LEFT :
+                                 (origin->x > halfw ? WLC_RESIZE_EDGE_RIGHT : 0)) |
+                                (origin->y < halfh ? WLC_RESIZE_EDGE_TOP :
+                                 (origin->y > halfh ? WLC_RESIZE_EDGE_BOTTOM : 0));
+   }
+
+   wlc_view_set_state(view, WLC_BIT_RESIZING, true);
+}
+
+static void
+stop_interactive_action(void)
+{
+   if (!compositor.action.view)
+      return;
+
+   wlc_view_set_state(compositor.action.view, WLC_BIT_RESIZING, false);
+   memset(&compositor.action, 0, sizeof(compositor.action));
+}
+
+static wlc_handle
+get_topmost(wlc_handle output, size_t offset)
+{
+   size_t memb;
+   const wlc_handle *views = wlc_output_get_views(output, &memb);
+   return (memb > 0 ? views[(memb - 1 + offset) % memb] : 0);
+}
+
+static void
+move(wlc_handle view, enum move_to d)
+{
+   const struct wlc_size *r;
+   wlc_handle output = wlc_view_get_output(view);
+
+   if (!(r = wlc_output_get_resolution(output)))
+      return;
+
+   // if has parent (popup window). What gnome-terminal profile?????
+   if (wlc_view_get_parent(view))
+      return;
+
+   if (wlc_view_get_state(view) & WLC_BIT_FULLSCREEN)
+      wlc_view_set_state(view, WLC_BIT_FULLSCREEN, false);
+
+   if (d == LEFT) {
+      struct wlc_geometry g = { { 0, 0 }, { (r->w / 2), (r->h) } };
+      wlc_view_set_geometry(view, 0, &g);
+   } else if (d == DOWN) {
+      struct wlc_geometry g = { { 0, r->h / 2 }, { r->w, r->h / 2 } };
+      wlc_view_set_geometry(view, 0, &g);
+   } else if (d == UP) {
+      struct wlc_geometry g = { { 0, 0 }, { r->w, r->h / 2 } };
+      wlc_view_set_geometry(view, 0, &g);
+   } else if (d == RIGHT) {
+      struct wlc_geometry g = { { r->w / 2, 0 }, { r->w / 2, r->h } };
+      wlc_view_set_geometry(view, 0, &g);
+   }
+}
+
+static void
+key_cb_toggle_fullscreen(wlc_handle view)
+{
+   static struct wlc_geometry old;
+
+   if (wlc_view_get_state(view) & WLC_BIT_FULLSCREEN) {
+      wlc_view_set_state(view, WLC_BIT_FULLSCREEN, false);
+      wlc_view_set_geometry(view, 0, &old);
+   } else {
+      memcpy((void*) (&old), (void*) (wlc_view_get_geometry(view)), sizeof(old));
+      wlc_view_set_state(view, WLC_BIT_FULLSCREEN, true);
+      const struct wlc_size *r = wlc_output_get_resolution(wlc_view_get_output(view));
+      struct wlc_geometry g = { { 0, 0 }, { r->w, r->h }};
+      wlc_view_set_geometry(view, 0, &g);
+   }
+}
+
+//
+// callback
+//
+
+static void
+output_resolution(wlc_handle output, const struct wlc_size *from, const struct wlc_size *to)
+{
+   (void)from, (void)to, (void)output;
+}
+
+static bool
+view_created(wlc_handle view)
+{
+   if ((chck_cstreq(wlc_view_get_class(view), "bemenu")) ||
+       (chck_cstreq(wlc_view_get_title(view), "bemenu")) ||
+       (chck_cstreq(wlc_view_get_app_id(view), "bemenu"))) {
+      // Do not allow more than one bemenu instance
+      if (view && wlc_view_get_type(view) & BIT_BEMENU)
+         return false;
+
+      wlc_view_set_type(view, BIT_BEMENU, true);   // XXX: Hack
+      is_menu = true;
+   }
+   fprintf(stderr, "title: %s\n", wlc_view_get_title(view));
+   fprintf(stderr, "class: %s\n", wlc_view_get_class(view));
+   fprintf(stderr, "id: %s\n", wlc_view_get_app_id(view));
+   if (wlc_view_get_type(view) & WLC_BIT_OVERRIDE_REDIRECT)
+      fprintf(stderr, "wiew type: %s\n", "WLC_BIT_OVERRIDE_REDIRECT");
+   if (wlc_view_get_type(view) & WLC_BIT_UNMANAGED)
+      fprintf(stderr, "view type: %s\n", "WLC_BIT_UNMANAGED");
+   if (wlc_view_get_type(view) & WLC_BIT_SPLASH)
+      fprintf(stderr, "view type: %s\n", "WLC_BIT_SPLASH");
+   if (wlc_view_get_type(view) & WLC_BIT_MODAL)
+      fprintf(stderr, "view type: %s\n", "WLC_BIT_MODAL");
+   if (wlc_view_get_type(view) & WLC_BIT_POPUP)
+      fprintf(stderr, "view type: %s\n", "WLC_BIT_POPUP");
+   fprintf(stderr, "\n");
+
+   wlc_view_set_mask(view, wlc_output_get_mask(wlc_view_get_output(view)));
+   wlc_view_bring_to_front(view);
+   wlc_view_focus(view);
+   return true;
+}
+
+static void
+view_destroyed(wlc_handle view)
+{
+   if (wlc_view_get_type(view) & BIT_BEMENU)
+      is_menu = false;
+
+   wlc_view_focus(get_topmost(wlc_view_get_output(view), 0));
+}
+
+static void
+view_focus(wlc_handle view, bool focus)
+{
+   wlc_view_set_state(view, WLC_BIT_ACTIVATED, focus);
+}
+
+static void
+view_request_move(wlc_handle view, const struct wlc_point *origin)
+{
+   start_interactive_move(view, origin);
+}
+
+static void
+view_request_resize(wlc_handle view, uint32_t edges, const struct wlc_point *origin)
+{
+   start_interactive_resize(view, edges, origin);
+}
+
+static void
+view_request_geometry(wlc_handle view, const struct wlc_geometry *g)
+{
+   (void)view, (void)g;
+}
+
+static bool
+keyboard_key(wlc_handle view, uint32_t time, const struct wlc_modifiers *modifiers, uint32_t key, enum wlc_key_state state)
+{
+   (void)time, (void)key;
+   const uint32_t sym = wlc_keyboard_get_keysym_for_key(key, NULL);
+   char *terminal = (getenv("TERMINAL") ? getenv("TERMINAL") : "weston-terminal");
+   char *menu = (getenv("MENU") ? getenv("MENU") : "bemenu-run");
+
+
+   if (state == WLC_KEY_STATE_PRESSED) {
+      if (is_menu)
+         return false;
+      if (view) {
+         if (modifiers->mods & prefix && sym == XKB_KEY_q) {
+            wlc_view_close(view);
+            return true;
+         } else if (modifiers->mods & prefix &&
+                    (sym == XKB_KEY_Tab || sym == XKB_KEY_k || sym == XKB_KEY_j)) {
+            wlc_view_send_to_back(view);
+            wlc_view_focus(get_topmost(wlc_view_get_output(view), 0));
+            return true;
+         } else if ((modifiers->mods & prefix && sym == XKB_KEY_f) ||
+                    (sym == XKB_KEY_F11)) {
+            key_cb_toggle_fullscreen(view);
+            return true;
+         } else if (modifiers->mods & prefix && (sym == XKB_KEY_Left ||
+                                                 sym == XKB_KEY_KP_Left)) {
+            move(view, LEFT);
+            return true;
+         } else if (modifiers->mods & prefix && (sym == XKB_KEY_Down ||
+                                                 sym == XKB_KEY_KP_Down)) {
+            move(view, DOWN);
+            return true;
+         } else if (modifiers->mods & prefix && (sym == XKB_KEY_Up ||
+                                                 sym == XKB_KEY_KP_Up)) {
+            move(view, UP);
+            return true;
+         } else if (modifiers->mods & prefix && (sym == XKB_KEY_Right ||
+                                                 sym == XKB_KEY_KP_Right)) {
+            move(view, RIGHT);
+            return true;
+         }
+      }
+
+      if (modifiers->mods & prefix && sym == XKB_KEY_Escape) {
+         wlc_terminate();
+         return true;
+      } else if (modifiers->mods & prefix && sym == XKB_KEY_Return) {
+            wlc_exec(terminal, (char*const[]){ terminal, NULL });
+            return true;
+      } else if (modifiers->mods & prefix && sym == XKB_KEY_p) {
+            wlc_exec(menu, (char*const[]){ menu, NULL });
+            return true;
+      }
+   }
+
+   return false;
+}
+
+static bool
+pointer_button(wlc_handle view, uint32_t time, const struct wlc_modifiers *modifiers, uint32_t button, enum wlc_button_state state, const struct wlc_point *position)
+{
+   (void)button, (void)time, (void)modifiers;
+
+   if (is_menu)
+      return false;
+
+   if (state == WLC_BUTTON_STATE_PRESSED) {
+      wlc_view_focus(view);
+      if (view) {
+         if (modifiers->mods & prefix && button == BTN_LEFT)
+            start_interactive_move(view, position);
+         if (modifiers->mods & prefix && button == BTN_RIGHT)
+            start_interactive_resize(view, 0, position);
+      }
+   } else {
+      stop_interactive_action();
+   }
+
+   return (compositor.action.view ? true : false);
+}
+
+static bool
+pointer_motion(wlc_handle handle, uint32_t time, const struct wlc_point *position)
+{
+   (void)handle, (void)time;
+
+   if (compositor.action.view) {
+      const int32_t dx = position->x - compositor.action.grab.x;
+      const int32_t dy = position->y - compositor.action.grab.y;
+      struct wlc_geometry g = *wlc_view_get_geometry(compositor.action.view);
+
+      if (compositor.action.edges) {
+         const struct wlc_size min = { 80, 40 };
+
+         struct wlc_geometry n = g;
+         if (compositor.action.edges & WLC_RESIZE_EDGE_LEFT) {
+            n.size.w -= dx;
+            n.origin.x += dx;
+         } else if (compositor.action.edges & WLC_RESIZE_EDGE_RIGHT) {
+            n.size.w += dx;
+         }
+
+         if (compositor.action.edges & WLC_RESIZE_EDGE_TOP) {
+            n.size.h -= dy;
+            n.origin.y += dy;
+         } else if (compositor.action.edges & WLC_RESIZE_EDGE_BOTTOM) {
+            n.size.h += dy;
+         }
+
+         if (n.size.w >= min.w) {
+            g.origin.x = n.origin.x;
+            g.size.w = n.size.w;
+         }
+
+         if (n.size.h >= min.h) {
+            g.origin.y = n.origin.y;
+            g.size.h = n.size.h;
+         }
+
+         wlc_view_set_geometry(compositor.action.view, compositor.action.edges, &g);
+      } else {
+         g.origin.x += dx;
+         g.origin.y += dy;
+         wlc_view_set_geometry(compositor.action.view, 0, &g);
+      }
+
+      compositor.action.grab = *position;
+   }
+
+   // In order to give the compositor control of the pointer placement it needs
+   // to be explicitly set after receiving the motion event:
+   wlc_pointer_set_position(position);
+   return (compositor.action.view ? true : false);
+}
+
+static void
+cb_log(enum wlc_log_type type, const char *str)
+{
+   (void)type;
+   printf("%s\n", str);
+}
+
+int
+main()
+{
+   wlc_log_set_handler(cb_log);
+
+   wlc_set_output_resolution_cb(output_resolution);
+   wlc_set_view_created_cb(view_created);
+   wlc_set_view_destroyed_cb(view_destroyed);
+   wlc_set_view_focus_cb(view_focus);
+   wlc_set_view_request_move_cb(view_request_move);
+   wlc_set_view_request_resize_cb(view_request_resize);
+   wlc_set_view_request_geometry_cb(view_request_geometry);
+   wlc_set_keyboard_key_cb(keyboard_key);
+   wlc_set_pointer_button_cb(pointer_button);
+   wlc_set_pointer_motion_cb(pointer_motion);
+
+   if (!wlc_init())
+      return EXIT_FAILURE;
+
+   prefix = (wlc_get_backend_type() == WLC_BACKEND_X11 ? WLC_BIT_MOD_ALT : WLC_BIT_MOD_LOGO);
+   wlc_run();
+   return EXIT_SUCCESS;
+}
