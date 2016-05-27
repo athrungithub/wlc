@@ -144,30 +144,30 @@ output_resolution(wlc_handle output, const struct wlc_size *from, const struct w
 static bool
 view_created(wlc_handle view)
 {
-   if ((chck_cstreq(wlc_view_get_class(view), "bemenu")) ||
-       (chck_cstreq(wlc_view_get_title(view), "bemenu")) ||
-       (chck_cstreq(wlc_view_get_app_id(view), "bemenu"))) {
+   if (chck_cstreq(wlc_view_get_class(view), "bemenu") || chck_cstreq(wlc_view_get_title(view), "bemenu") || chck_cstreq(wlc_view_get_app_id(view), "bemenu")) {
       // Do not allow more than one bemenu instance
-      if (view && wlc_view_get_type(view) & BIT_BEMENU)
+      if (is_menu) {
          return false;
-
-      wlc_view_set_type(view, BIT_BEMENU, true);   // XXX: Hack
-      is_menu = true;
+      }
+      else {
+         wlc_view_set_type(view, BIT_BEMENU, true);   // XXX: Hack
+         is_menu = true;
+      }
    }
-   fprintf(stderr, "title: %s\n", wlc_view_get_title(view));
-   fprintf(stderr, "class: %s\n", wlc_view_get_class(view));
-   fprintf(stderr, "id: %s\n", wlc_view_get_app_id(view));
-   if (wlc_view_get_type(view) & WLC_BIT_OVERRIDE_REDIRECT)
-      fprintf(stderr, "wiew type: %s\n", "WLC_BIT_OVERRIDE_REDIRECT");
-   if (wlc_view_get_type(view) & WLC_BIT_UNMANAGED)
-      fprintf(stderr, "view type: %s\n", "WLC_BIT_UNMANAGED");
-   if (wlc_view_get_type(view) & WLC_BIT_SPLASH)
-      fprintf(stderr, "view type: %s\n", "WLC_BIT_SPLASH");
-   if (wlc_view_get_type(view) & WLC_BIT_MODAL)
-      fprintf(stderr, "view type: %s\n", "WLC_BIT_MODAL");
-   if (wlc_view_get_type(view) & WLC_BIT_POPUP)
-      fprintf(stderr, "view type: %s\n", "WLC_BIT_POPUP");
-   fprintf(stderr, "\n");
+   /*fprintf(stderr, "title: %s\n", wlc_view_get_title(view));*/
+   /*fprintf(stderr, "class: %s\n", wlc_view_get_class(view));*/
+   /*fprintf(stderr, "id: %s\n", wlc_view_get_app_id(view));*/
+   /*if (wlc_view_get_type(view) & WLC_BIT_OVERRIDE_REDIRECT)*/
+      /*fprintf(stderr, "wiew type: %s\n", "WLC_BIT_OVERRIDE_REDIRECT");*/
+   /*if (wlc_view_get_type(view) & WLC_BIT_UNMANAGED)*/
+      /*fprintf(stderr, "view type: %s\n", "WLC_BIT_UNMANAGED");*/
+   /*if (wlc_view_get_type(view) & WLC_BIT_SPLASH)*/
+      /*fprintf(stderr, "view type: %s\n", "WLC_BIT_SPLASH");*/
+   /*if (wlc_view_get_type(view) & WLC_BIT_MODAL)*/
+      /*fprintf(stderr, "view type: %s\n", "WLC_BIT_MODAL");*/
+   /*if (wlc_view_get_type(view) & WLC_BIT_POPUP)*/
+      /*fprintf(stderr, "view type: %s\n", "WLC_BIT_POPUP");*/
+   /*fprintf(stderr, "\n");*/
 
    wlc_view_set_mask(view, wlc_output_get_mask(wlc_view_get_output(view)));
    wlc_view_bring_to_front(view);
@@ -208,18 +208,25 @@ view_request_geometry(wlc_handle view, const struct wlc_geometry *g)
    (void)view, (void)g;
 }
 
+static void
+run_bemenu(void)
+{
+   char *menu = (getenv("MENU") ? getenv("MENU") : "bemenu-run");
+
+   if (is_menu)
+      return;
+   wlc_exec(menu, (char*const[]){ menu, NULL });
+}
+
 static bool
 keyboard_key(wlc_handle view, uint32_t time, const struct wlc_modifiers *modifiers, uint32_t key, enum wlc_key_state state)
 {
    (void)time, (void)key;
    const uint32_t sym = wlc_keyboard_get_keysym_for_key(key, NULL);
    char *terminal = (getenv("TERMINAL") ? getenv("TERMINAL") : "weston-terminal");
-   char *menu = (getenv("MENU") ? getenv("MENU") : "bemenu-run");
 
 
    if (state == WLC_KEY_STATE_PRESSED) {
-      if (is_menu)
-         return false;
       if (view) {
          if (modifiers->mods & prefix && sym == XKB_KEY_q) {
             wlc_view_close(view);
@@ -259,7 +266,7 @@ keyboard_key(wlc_handle view, uint32_t time, const struct wlc_modifiers *modifie
             wlc_exec(terminal, (char*const[]){ terminal, NULL });
             return true;
       } else if (modifiers->mods & prefix && sym == XKB_KEY_p) {
-            wlc_exec(menu, (char*const[]){ menu, NULL });
+            run_bemenu();
             return true;
       }
    }
